@@ -166,7 +166,7 @@ function getContentFullStruct(content) {
 function tryFindingListeningHabits(tracksContent) {
   const threeDays = 3 * 24 * 60 * 60
   const artists = {}
-  tracksContent.forEach(track => {
+  tracksContent.forEach((track) => {
     if (track['@attr'] && track['@attr'].nowplaying === 'true')
       return
 
@@ -177,14 +177,25 @@ function tryFindingListeningHabits(tracksContent) {
     if (artists[artistName] === undefined) {
       artists[artistName] = [ { start: uts, end: uts } ]
     }
-    const threeDaysBeforeLastEndListening = artists[artistName].last().end - threeDays
-    // last time listened too far away, create a new habits for this artist
-    if (uts < threeDaysBeforeLastEndListening) {
-      artists[artistName].push({ start: uts, end: uts })
-    }
-    // increase last time start, since continuing listening to this artist
+
     else {
-      artists[artistName].last().end = uts
+      let extendedOneTimespan = false,
+        curStart,
+        curEnd
+      for (let i = 0; i < artists[artistName].length; i++) {
+        curStart = artists[artistName][i].start
+        curEnd = artists[artistName][i].end
+        if (uts >= curStart - threeDays && uts <= curStart) {
+          artists[artistName][i].start = uts
+          extendedOneTimespan = true
+        } else if (uts <= curEnd + threeDays && uts >= curEnd) {
+          artists[artistName][i].end = uts
+          extendedOneTimespan = true
+        }
+      }
+      if (!extendedOneTimespan) {
+        artists[artistName].push({start: uts, end: uts})
+      }
     }
   })
   return artists
@@ -308,10 +319,10 @@ function filterOutOneTimeArtists(habits) {
 
   const names = Object.keys(habits)
   for (let i = 0; i < names.length; i++) {
-    /*if (habits[names[i]].length === 1) {
+    if (habits[names[i]].length === 1) {
       delete habits[names[i]]
       continue
-    }*/
+    }
     if (containsWrongDate(habits[names[i]])) {
       delete habits[names[i]]
     }
@@ -323,7 +334,19 @@ function filterOutOneTimeArtists(habits) {
 
 function genImg(habits) {
   filterOutOneTimeArtists(habits)
+
+  let minTime = Infinity,
+    maxTime = -Infinity
   const names = Object.keys(habits)
+  for (let i = 0; i < names.length; i++) {
+    for (let j = 0; j < habits[names[i]].length; j++) {
+      if (habits[names[i]][j].start < minTime)
+        minTime = habits[names[i]][j].start
+      if (habits[names[i]][j].end > maxTime)
+        maxTime = habits[names[i]][j].end
+    }
+  }
+
   const lenHabits = names.length
   const width = 1460 * 3 + 200
   const height = lenHabits * 20 + 40
@@ -335,9 +358,9 @@ function genImg(habits) {
 
     for (let j = 0; j < habits[art].length; j++) {
       const h = habits[art][j]
-      const xUL = ((h.start - 1387584000) / 86400) * 2// minus 44 years, pin start to 2014
+      const xUL = 500 + ((h.start - minTime) / 86400) * 2// minus 44 years, pin start to 2014
       const yUL = (i * 20) + 10
-      const xLR = ((h.end - 1387584000) / 86400) * 2
+      const xLR = 500 + ((h.end - minTime) / 86400) * 2
       const yLR = (i * 20) + 30
       wip.drawRectangle(xUL, yUL, xLR, yLR)
     }

@@ -1,0 +1,95 @@
+
+html, body {
+    padding: 0;
+    margin: 0;
+    height: 100%;
+    width: 100%;
+}
+
+#timeline {
+    position: relative;
+    display: flex;
+    flex-direction: row;
+}
+
+#artistsColumn {
+    background: white;
+    z-index: 2;
+    left: 0;
+    position: sticky;
+    display: flex;
+    flex-direction: column;
+    min-width: 200px;
+    max-width: 200px;
+    border-right: 1px solid black;
+    box-shadow: 2px 2px 6px 2px rgba(0,0,0,0.2);
+}
+
+#timelineColumn {
+    position: sticky;
+    display: flex;
+    flex-direction: column;
+}
+
+.artistDiv {
+    position: relative;
+    height: 25px;
+    line-height: 25px;
+    padding-left: 5px;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    border-bottom: 1px solid black;
+}
+
+.timelineDiv {
+    position: relative;
+    display: flex;
+    flex-direction: row;
+    z-index: 0;
+    height: 25px;
+    line-height: 25px;
+    overflow: hidden;
+    border-bottom: 1px solid black;
+}
+
+.timespanDiv {
+    position: sticky;
+    min-height: 25px;
+    min-width: 1px;
+    height: 25px;
+    line-height: 25px;
+    overflow: hidden;
+    background-color: black;
+}
+
+.timespanDiv:hover {
+    background-color: gray;
+}
+
+.timespanLabel {
+    position: absolute;
+    height: 25px;
+    line-height: 25px;
+}
+
+#details {
+    display: none;
+    position: fixed;
+    bottom: 0;
+    height: 35px;
+    line-height: 35px;
+    padding-left: 13px;
+    padding-right: 13px;
+    z-index: 30;
+    background-color: #404040;
+    color: white;
+    left: 50%;
+    transform: translateX(-50%);
+    box-shadow: 0 -2px 6px 2px rgba(0,0,0,0.2);
+}
+
+#details > * {
+    margin-left: 5px;
+    margin-right: 5px;
+}
