@@ -3,9 +3,11 @@
 const http = require('http')
 const path = require('path')
 const url = require('url')
+const fs = require('fs')
 
 const gm = require('gm')
 
+const cmd = require('./commandline')
 const relative = require('./relative')
 const objstruct = require('./objStruct')
 require('./polyfills')
@@ -16,7 +18,8 @@ const user = '',
   method = '&&&METHOD&&&',
   userT = '&&&USER&&&',
   apiKey = '&&&API_KEY&&&',
-  noPage = '&&&NO_PAGE&&&'
+  noPage = '&&&NO_PAGE&&&',
+  artistToSearch = '&&&ARTIST&&&'
 
 const lastfmUri = `http://ws.audioscrobbler.com/2.0/?method=user.${method}&user=${userT}&api_key=${apiKey}&page=${noPage}&format=json`
 const lastfmTopAlbums = lastfmUri
@@ -32,10 +35,18 @@ const lastfmRecentTracks = lastfmUri
   .replace(userT, user)
   .replace(apiKey, lastfmApiKey)
 
+const lastfmSimpleMethodUri = `http://ws.audioscrobbler.com/2.0/?method=${method}&artist=${artistToSearch}&api_key=${apiKey}&format=json`
+const lastfmArtistsTopTags = lastfmSimpleMethodUri
+  .replace(method, 'artist.gettoptags')
+  .replace(apiKey, lastfmApiKey)
+const lastfmTrackInfo = lastfmSimpleMethodUri
+  .replace(method, 'track.getInfo')
+  .replace(apiKey, lastfmApiKey)
+
 function optProxy(baseOpt) {
   return {
-    host: "",  // Proxy IP here
-    port: 0,   // Proxy port here
+    host: "",
+    port: 1,
     path: baseOpt.completeUrl,
     method: baseOpt.method,
   }
@@ -95,7 +106,14 @@ function getPageFn(reqUrl, total) {
   return function(nb, cb) {
     console.log(`request ${nb}/${total === undefined ? 'unknown' : total.toString()}`)
     req(reqUrl.replace('&&&NO_PAGE&&&', nb), 'GET', (err, page) => {
-      if (err) return cb(err)
+      if (err) {
+        return setTimeout(() => {
+          req(reqUrl.replace('&&&NO_PAGE&&&', nb), 'GET', (err, page) => {
+            if (err) return cb(err)
+            return cb(null, page)
+          })
+        }, 10000)
+      }
       return cb(null, page)
     })
   }
@@ -154,6 +172,38 @@ function getLastfmRecentTracks(cb) {
   })
 }
 
+function testFilename(name) {
+  try {
+    const fd = fs.openSync(`artistsTopTagsSave/${name}.json`)
+    fs.closeSync(fd)
+    return true
+  } catch (e) {
+    return false
+  }
+}
+
+function forceUtf16(name) {
+  if (testFilename(name)) return name
+  for (let i = 0; i < name.length; i++) {
+    if (name.charCodeAt(i) > 8192 || name[i] === '/') {
+      name = name.substring(0, i) + "_" + name.substring(i + 1)
+    }
+  }
+  return name
+}
+
+function getLastfmArtistsTopTags(artist, cb) {
+  if (relative.exists(`artistsTopTagsSave/${forceUtf16(artist)}.json`)) {
+    return cb(null, relative.jsonRead(`artistsTopTagsSave/${forceUtf16(artist)}.json`))
+  }
+  console.log(`fetching lastfm ${artist} top tags`)
+  req(lastfmArtistsTopTags.replace(artistToSearch, artist), 'GET', (err, res) => {
+    if (err) return cb(err)
+    relative.jsonSave(res, `artistsTopTagsSave/${forceUtf16(artist)}.json`)
+    return cb(null, res)
+  })
+}
+
 function getContentFullStruct(content) {
   let struct = {}
   content.forEach(track => {
@@ -165,6 +215,7 @@ function getContentFullStruct(content) {
 
 function tryFindingListeningHabits(tracksContent) {
   const threeDays = 3 * 24 * 60 * 60
+  const oneMonth = 30 * 24 * 60 * 60
   const artists = {}
   tracksContent.forEach((track) => {
     if (track['@attr'] && track['@attr'].nowplaying === 'true')
@@ -185,10 +236,10 @@ function tryFindingListeningHabits(tracksContent) {
       for (let i = 0; i < artists[artistName].length; i++) {
         curStart = artists[artistName][i].start
         curEnd = artists[artistName][i].end
-        if (uts >= curStart - threeDays && uts <= curStart) {
+        if (uts >= curStart - oneMonth && uts <= curStart) {
           artists[artistName][i].start = uts
           extendedOneTimespan = true
-        } else if (uts <= curEnd + threeDays && uts >= curEnd) {
+        } else if (uts <= curEnd + oneMonth && uts >= curEnd) {
           artists[artistName][i].end = uts
           extendedOneTimespan = true
         }
@@ -199,6 +250,74 @@ function tryFindingListeningHabits(tracksContent) {
     }
   })
   return artists
+}
+
+function topByArbitraryMonths(tracksContent) {
+  const oneMonth = 30 * 24 * 60 * 60
+  const months = {}
+  tracksContent.forEach((track) => {
+    if (track['@attr'] && track['@attr'].nowplaying === 'true')
+      return
+
+    const artistName = track.artist['#text']
+    const uts = parseInt(track.date.uts)
+    const month = Math.floor(uts / oneMonth)
+
+    if (months[month] === undefined)
+      months[month] = {}
+    if (months[month][artistName] === undefined)
+      months[month][artistName] = 0
+    months[month][artistName] += 1
+  })
+
+  const topByMonths = {}
+  Object.keys(months).forEach(m => {
+    topByMonths[m] = Object.keys(months[m]).sort((a, b) => {
+      return months[m][b] - months[m][a]
+    }).map(k => { return { artist: k, tracksListened: months[m][k] } })
+  })
+
+  return topByMonths
+}
+
+function filterOutNotInterestingArtistsInTopByMonths(top) {
+  const newTop = {}
+  Object.keys(top).forEach(m => {
+    newTop[m] = top[m].filter(el => el.tracksListened > 5)
+  })
+  return newTop
+}
+
+function extractTags(lastfmTags) {
+  if (!lastfmTags) return []
+  if (lastfmTags.error) return []
+  return lastfmTags
+    .toptags
+    .tag
+    .map((el) => {
+      return {
+        name: el.name,
+        count: el.count
+      }
+    })
+}
+
+function fetchTags(habits, cb) {
+  const artists = Object.keys(habits)
+  let idx
+  awaitFor(
+    0,
+    artists.length - 1,
+    (i, cb) => {
+      idx = i
+      getLastfmArtistsTopTags(artists[i], cb)
+    },
+    res => habits[artists[idx]].tags = extractTags(res),
+    (err) => {
+      if (err) return cb(err)
+      cb()
+    }
+  )
 }
 
 function getAllArtistsFromTracks(tracksContent) {
@@ -240,6 +359,11 @@ function remapArtistsSongFromAlbum(trackContent) {
     }
   }
 
+  /**
+   * Fusion albums tracks into one album from one artist
+   * (eg: Kendrick Lamar's Black Panther album, with so many feats, which split
+   * the album into small bits with artist fields containing Kendrick + all feats)
+   */
   alb = Object.keys(albums)
   alb.forEach(albName => {
     const artitsNames = Object.keys(albums[albName])
@@ -257,7 +381,7 @@ function remapArtistsSongFromAlbum(trackContent) {
               albums[albName][artitsNames[j]][a].artist['#text'] = artitsNames[i]
             }
             albums[albName][artitsNames[i]].push(...albums[albName][artitsNames[j]])
-            delete albums[albName][artitsNames[j]]
+            albums[albName][artitsNames[j]] = []
           }
         }
       }
@@ -377,11 +501,239 @@ function genImg(habits) {
   })
 }
 
+function reListeningArtistStat(habits) {
+  const totalH = Object.keys(habits).map(art => {
+    return {artist: art, len: habits[art].length}
+  })
+  totalH.sort((a, b) => b.len - a.len)
+  totalH.forEach(el => console.log(`${el.artist}: ${el.len}`))
+}
+
+function ratioRelistening(habits) {
+  const relistenRate = Object.keys(habits).map(art => {
+    return {artist: art, len: habits[art].length}
+  })
+
+  const mean = relistenRate.mean(el => el.len)
+  const median = relistenRate.median(el => el.len)
+  console.log(mean, median)
+  console.log(relistenRate.filter(el => el.len > 1).length)
+  console.log(relistenRate.filter(el => el.len === 1).length)
+}
+
+function seasonStat(habits) {
+  const reh = Object.keys(habits).map(art => {
+    return {
+      artist: art,
+      summerTimes: habits[art].reduce((acc, el) => {
+        const startMonth = new Date(el.start * 1000).getUTCMonth()
+        if (startMonth < 8 && startMonth > 5) {
+          return acc + ((el.end - el.start) / (60 * 60 * 24))
+        }
+        return acc
+      }, 0),
+      winterTimes: habits[art].reduce((acc, el) => {
+        const startMonth = new Date(el.start * 1000).getUTCMonth()
+        if (startMonth < 2 || startMonth > 9) {
+          return acc + ((el.end - el.start) / (60 * 60 * 24))
+        }
+        return acc
+      }, 0),
+      autumnTimes: habits[art].reduce((acc, el) => {
+        const startMonth = new Date(el.start * 1000).getUTCMonth()
+        if (startMonth < 11 && startMonth > 7) {
+          return acc + ((el.end - el.start) / (60 * 60 * 24))
+        }
+        return acc
+      }, 0),
+      springTimes: habits[art].reduce((acc, el) => {
+        const startMonth = new Date(el.start * 1000).getUTCMonth()
+        if (startMonth < 5 && startMonth > 1) {
+          return acc + ((el.end - el.start) / (60 * 60 * 24))
+        }
+        return acc
+      }, 0),
+      allTimes: false
+    }
+  })
+  reh.forEach((recurrence) => {
+    recurrence.allTimes =
+      [
+        recurrence.summerTimes,
+        recurrence.winterTimes,
+        recurrence.autumnTimes,
+        recurrence.springTimes
+      ].filter((seasonValue) => seasonValue > 2)
+        .length === 4
+  })
+
+  console.log('------- SUMMER TIME ---------')
+  reh.sort((a, b) => b.summerTimes - a.summerTimes)
+  reh.forEach(el => {
+    if (el.summerTimes > 3 && !el.allTimes) console.log(`${el.artist}: ${el.summerTimes}`)
+  })
+  console.log('------- WINTER TIME ---------')
+  reh.sort((a, b) => b.winterTimes - a.winterTimes)
+  reh.forEach(el => {
+    if (el.winterTimes > 3 && !el.allTimes) console.log(`${el.artist}: ${el.winterTimes}`)
+  })
+  console.log('------- AUTUMN TIME ---------')
+  reh.sort((a, b) => b.autumnTimes - a.autumnTimes)
+  reh.forEach(el => {
+    if (el.autumnTimes > 3 && !el.allTimes) console.log(`${el.artist}: ${el.autumnTimes}`)
+  })
+  console.log('------- SPRING TIME ---------')
+  reh.sort((a, b) => b.springTimes - a.springTimes)
+  reh.forEach(el => {
+    if (el.springTimes > 3 && !el.allTimes) console.log(`${el.artist}: ${el.springTimes}`)
+  })
+  console.log('------- ALL TIME ---------')
+  reh.sort((a, b) => b.springTimes - a.springTimes)
+  reh.forEach(el => {
+    if (el.allTimes) console.log(`${el.artist}`)
+  })
+}
+
+function evolutionTopArtistsByPeriod(tracksContent, lenPeriod) {
+  if (!lenPeriod)
+    lenPeriod = (30 * 24 * 60 * 60)
+  const periods = {}
+  tracksContent.forEach((track) => {
+    if (track['@attr'] && track['@attr'].nowplaying === 'true')
+      return
+
+    const artistName = track.artist['#text']
+    const uts = parseInt(track.date.uts)
+    const period = Math.floor(uts / lenPeriod)
+
+    if (periods[period] === undefined)
+      periods[period] = {}
+    if (periods[period][artistName] === undefined)
+      periods[period][artistName] = 0
+    periods[period][artistName] += 1
+  })
+
+  let lastPeriod = undefined
+  Object.keys(periods).sort((a, b) => a - b).forEach(p => {
+    if (lastPeriod !== undefined) {
+
+      Object.keys(periods[lastPeriod]).forEach(artist => {
+        if (periods[p][artist])
+          periods[p][artist] += periods[lastPeriod][artist]
+        else
+          periods[p][artist] = periods[lastPeriod][artist]
+      })
+
+    }
+    lastPeriod = p
+  })
+
+  const topByPeriods = {}
+  Object.keys(periods).forEach(p => {
+    topByPeriods[p] = Object.keys(periods[p]).sort((a, b) => {
+      return periods[p][b] - periods[p][a]
+    }).map(k => { return { artist: k, tracksListened: periods[p][k] } })
+      .sort((a, b) => b.tracksListened - a.tracksListened)
+  })
+
+  return topByPeriods
+}
+
+
+function percentageOfTracksWithMbid(tracksContent) {
+
+  function printStats(nbMbid, artistMbid, albumMbid, trackMbid, total) {
+    if (typeof nbMbid === 'object') {
+      artistMbid = nbMbid.artistMbid
+      albumMbid = nbMbid.albumMbid
+      trackMbid = nbMbid.trackMbid
+      total = nbMbid.total
+      nbMbid = nbMbid.nbMbid
+    }
+    console.log('mbid:', nbMbid, '/', total, ',', (nbMbid / total * 100).toString().rs(12), '%')
+    console.log('artist mbid:', artistMbid, '/', total, ',', (artistMbid / total * 100).toString().rs(12), '%')
+    console.log('album mbid:', albumMbid, '/', total, ',', (albumMbid / total * 100).toString().rs(12), '%')
+    console.log('track mbid:', trackMbid, '/', total, ',', (trackMbid / total * 100).toString().rs(12), '%')
+  }
+
+  const byYear = {}
+  const albumMbidsToResponse = {}
+
+  let nbMbid = 0, artistMbid = 0, albumMbid = 0, trackMbid = 0
+  tracksContent.forEach(track => {
+    if (track['@attr'] && track['@attr'].nowplaying) return
+
+    let year = new Date(parseInt(track.date.uts) * 1000).getFullYear()
+
+    let oneMbid = false
+    if (track.artist && track.artist.mbid !== '') {
+      oneMbid = true
+      artistMbid++
+      if (!byYear[year]) {
+        byYear[year] = {}
+      }
+      byYear[year].artistMbid = byYear[year].artistMbid ? byYear[year].artistMbid + 1 : 1
+    }
+    if (track.album && track.album.mbid !== '') {
+      oneMbid = true
+      albumMbid++
+      if (!byYear[year]) {
+        byYear[year] = {}
+      }
+      byYear[year].albumMbid = byYear[year].albumMbid ? byYear[year].albumMbid + 1 : 1
+      albumMbidsToResponse[albumMbid] = null
+    }
+    if (track.mbid !== '') {
+      oneMbid = true
+      trackMbid++
+      if (!byYear[year]) {
+        byYear[year] = {}
+      }
+      byYear[year].trackMbid = byYear[year].trackMbid ? byYear[year].trackMbid + 1 : 1
+    }
+    if (oneMbid) {
+      nbMbid++
+      if (!byYear[year]) {
+        byYear[year] = {}
+      }
+      byYear[year].nbMbid = byYear[year].nbMbid ? byYear[year].nbMbid + 1 : 1
+    }
+    if (!byYear[year]) {
+      byYear[year] = {}
+    }
+    byYear[year].total = byYear[year].total ? byYear[year].total + 1 : 1
+
+  })
+  printStats(nbMbid, artistMbid, albumMbid, trackMbid, tracksContent.length)
+  Object.keys(byYear).forEach(year => {
+    console.log(year)
+    printStats(byYear[year])
+  })
+
+  Object.keys(albumMbidsToResponse).forEach(aMbid => {
+
+  })
+
+}
+
 getLastfmRecentTracks((err, content) => {
   console.log(getContentFullStruct(content))
-  remapArtistsSongFromAlbum(content)
-  const habits = tryFindingListeningHabits(content)
-  new ServeListeningHabits(habits)
-  genImg(habits)
+  percentageOfTracksWithMbid(content)
+
+  // remapArtistsSongFromAlbum(content)
+
+  //let topsByMonths = topByArbitraryMonths(content)
+  //topsByMonths = filterOutNotInterestingArtistsInTopByMonths(topsByMonths)
+  //cmd.printTopByMonth(topsByMonths)
+
+  // let topEvolution = evolutionTopArtistsByPeriod(content)
+  // cmd.printEvolutionTopByMonth(topEvolution)
+
+  //reListeningArtistStat(habits)
+  //seasonStat(habits)
+  //new ServeListeningHabits(habits)
+  //genImg(habits)
+  //ratioRelistening(habits)
+  console.log('finished')
 })
 
